@@ -5,7 +5,7 @@ use argp::FromArgs;
 use color_eyre::{eyre::Report, eyre::WrapErr};
 use commands::read_shell;
 
-/// Install LLVM tools
+/// Download, compile and install a specific LLVM version
 #[derive(FromArgs, PartialEq, Debug)]
 #[argp(subcommand, name = "install")]
 struct InstallSubcommand {
@@ -13,7 +13,7 @@ struct InstallSubcommand {
     #[argp(positional)]
     name: String,
 
-    /// Options: 16, 17, 18
+    /// Options: 16, 17, 18, 19
     #[argp(positional)]
     version: String,
 }

@@ -265,11 +265,10 @@ pub async fn llvm_17() -> Result<(), Report> {
     Ok(())
 }
 
-pub async fn llvm_18() -> Result<(), Report> {
-    let version = "18.1.2";
-
+pub async fn install_version(version: &str, env_var: &str) -> Result<(), Report> {
     let version_root_folder = dir_inside_cache_folder(version)?;
     let llvm_source_code_folder = dir_inside_cache_folder(format!("{version}/src"))?;
+    let (source_code_url, source_code_filename) = download_url(version);
 
     let (source_code_url, source_code_filename) = download_url(version);
 
@@ -352,13 +351,14 @@ pub async fn llvm_18() -> Result<(), Report> {
     // Setup env vars
     t3.set_subtask("configuring shell");
     let mut shell = read_shell()?;
-    let var = shell
-        .env_vars
-        .entry("LLVM_SYS_180_PREFIX".into())
-        .or_default();
+    let var = shell.env_vars.entry(env_var.into()).or_default();
     *var = dir_inside_cache_folder(version)?.display().to_string();
     write_shell(&shell)?;
     t3.finish();
 
     Ok(())
+}
+
+pub async fn llvm_18() -> Result<(), Report> {
+    install_version("18.1.2", "LLVM_SYS_180_PREFIX").await
 }
