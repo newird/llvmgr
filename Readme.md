@@ -1,6 +1,6 @@
 # llvmgr
 
-Helps you to download, compile and install LLVM.  
+Helps you to download, compile and install LLVM.
 Specially tailored for LLVM development with https://gitlab.com/taricorp/llvm-sys.rs
 
 ## Install
@@ -19,7 +19,7 @@ Install LLVM tools
 
 Arguments:
   name           Options: llvm
-  version        Options: 16, 17, 18
+  version        Options: 16, 17, 18, 19
 
 Options:
   -v, --verbose  Be verbose.
