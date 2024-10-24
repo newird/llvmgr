@@ -55,13 +55,26 @@ async fn main() -> Result<(), Report> {
         Commands::Install(cmd) => commands::install::run(&args, cmd)
             .await
             .wrap_err_with(|| format!("Unable to install {} {}", cmd.name, cmd.version)),
-        Commands::Env(cmd) if cmd.shell == "bash" => {
+
+        Commands::Env(cmd) => {
             let shell = read_shell().wrap_err("Unable to read shell configuration")?;
-            for (k, v) in shell.env_vars {
-                println!("export {k}={v}",);
+
+            match cmd.shell.as_str() {
+                "bash" | "zsh" => {
+                    for (k, v) in shell.env_vars {
+                        println!("export {k}={v}");
+                    }
+                    Ok(())
+                }
+                "fish" => {
+                    for (k, v) in shell.env_vars {
+                        println!("set {k} {v}");
+                    }
+                    Ok(())
+                }
+                _ => todo!(),
             }
-            Ok(())
         }
-        _ => todo!(),
     }
 }
+
