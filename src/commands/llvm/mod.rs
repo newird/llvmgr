@@ -82,7 +82,6 @@ pub async fn install_version(version: &str, env_var: &str) -> Result<(), Report>
     spawn_cmake(&t1, ["--build", "build"])?;
     t1.finish();
 
-    spawn_cmake(&t2, ["--install", "build"])?;
     t2.finish();
     // Setup env vars
     t3.set_subtask("configuring shell");
@@ -93,19 +92,16 @@ pub async fn install_version(version: &str, env_var: &str) -> Result<(), Report>
     t3.finish();
     t4.set_subtask("bin");
     move_dir(
-        cache_path(format!("{version}/src/build/bin"))?,
         cache_path(version)?,
     )?;
 
     t4.set_subtask("lib");
     move_dir(
-        cache_path(format!("{version}/src/build/lib"))?,
         cache_path(version)?,
     )?;
 
     t4.set_subtask("include");
     move_dir(
-        cache_path(format!("{version}/src/build/include"))?,
         cache_path(version)?,
     )?;
     if let Some(rm_src) = config.cache.get("delete_src") {

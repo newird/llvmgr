@@ -501,7 +501,7 @@ pub(crate) fn init_config() -> Result<(), Report> {
         .insert("LLVM_TARGETS_TO_BUILD".to_string(), "X86".to_string());
     config
         .compile_config
-        .insert("LLVM_INSTALL_PREFIX".to_string(), ".".to_string());
+        .insert("LLVM_INSTALL_PREFIX".to_string(), "install".to_string());
 
     let toml_string =
         toml::to_string(&config).wrap_err_with(|| format!("failed to read from {:?}", config))?;
