@@ -1,12 +1,18 @@
 mod llvm;
 
 use std::{
-    collections::HashMap,
-    io::{BufRead, Cursor, Read, Seek},
+    collections::{HashMap, VecDeque},
+    fmt::format,
+    fs::{self, read_to_string, File, OpenOptions},
+    io::{self, BufRead, BufReader, Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
-use color_eyre::{eyre::Context, Help, Report};
+use color_eyre::{
+    eyre::{Context as EyreContext, ContextCompat},
+    Help, Report,
+};
 use fs_extra::dir::CopyOptions;
 use reqwest::IntoUrl;
 use serde::{Deserialize, Serialize};
@@ -36,7 +42,7 @@ fn cache_root() -> Result<PathBuf, FileSystemError> {
     Ok(root)
 }
 
-fn dir_inside_cache_folder(path: impl AsRef<Path>) -> Result<PathBuf, FileSystemError> {
+fn mkdir_inside_cache_folder(path: impl AsRef<Path>) -> Result<PathBuf, FileSystemError> {
     let dirs = directories::UserDirs::new().ok_or(FileSystemError::UserDirError)?;
     let p = dirs.home_dir().join(".cache/llvmgr").join(path);
     std::fs::create_dir_all(&p).map_err(FileSystemError::IO)?;
@@ -50,7 +56,7 @@ pub(crate) fn cache_path(path: impl AsRef<Path>) -> Result<PathBuf, FileSystemEr
 }
 
 fn set_current_dir_inside_cache_folder(path: impl AsRef<Path>) -> Result<(), FileSystemError> {
-    let p = dir_inside_cache_folder(path)?;
+    let p = mkdir_inside_cache_folder(path)?;
     std::env::set_current_dir(p).map_err(FileSystemError::IO)
 }
 
@@ -312,6 +318,28 @@ pub(crate) async fn download_ungz_untar(
     Ok(llvm_tar_gz_file_path)
 }
 
+// add some code to line of the file
+pub fn add_line_to_file(path: &Path, content: String, line: u32) -> Result<(), Report> {
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    let reader = BufReader::new(&file);
+
+    let mut lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
+
+    let index = if line > 0 { (line - 1) as usize } else { 0 };
+    if index <= lines.len() {
+        lines.insert(index, content);
+    } else {
+        lines.resize(index, String::new());
+        lines.push(content);
+    }
+
+    let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
+
+    for line_content in lines {
+        writeln!(file, "{}", line_content)?;
+    }
+    Ok(())
+}
 // parses strings like: "[179/3416]"
 fn is_progress(line: &str) -> nom::IResult<&str, (usize, usize)> {
     let (line, _) = nom::bytes::complete::tag("[")(line)?;
@@ -334,7 +362,7 @@ pub(crate) enum SpawnError {
     IO(std::io::Error),
 }
 
-pub(crate) fn spawn_cmake<I, S>(t: &TaskRef, args: I) -> Result<(), SpawnError>
+pub(crate) fn spawn_cmake<I, S>(t: &TaskRef, args: I) -> Result<(), Report>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -348,11 +376,16 @@ where
         .spawn()
         .map_err(SpawnError::IO)?;
 
-    if let Some(stdout) = process.stdout.take() {
-        let lines = std::io::BufReader::new(stdout);
-        let mut last_percentage = 0.0;
+    let log_path = cache_root().wrap_err("no cache")?.join("compile.log");
+    let mut log_file = fs::File::create(log_path)?;
 
-        for line in lines.lines().flatten() {
+    let mut last_percentage = 0.0;
+
+    if let Some(stdout) = process.stdout.take() {
+        let lines = BufReader::new(stdout);
+
+        for line in lines.lines().map_while(Result::ok) {
+            writeln!(&mut log_file, "{}", line)?;
             if let Ok((_, (current, total))) = is_progress(&line) {
                 last_percentage = current as f64 / total as f64;
             }
@@ -360,13 +393,13 @@ where
             t.set_subtask_with_percentage(&line, last_percentage);
         }
     }
+
     process.wait().map_err(SpawnError::IO)?;
 
     t.set_subtask_with_percentage("", 1.0);
 
     Ok(())
 }
-
 #[derive(Default, Serialize, Deserialize)]
 pub struct Shell {
     pub env_vars: HashMap<String, String>,
@@ -400,6 +433,94 @@ pub(crate) fn write_shell(shell: &Shell) -> Result<(), ReadShellError> {
         .join("shell");
     let shell = serde_json::to_string_pretty(&shell).expect("this should not fail");
     std::fs::write(shell_path, shell).map_err(ReadShellError::IO)
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+pub struct Config {
+    cache: HashMap<String, String>,
+    compile_config: HashMap<String, String>,
+    cmake: HashMap<String, String>,
+}
+
+impl Config {
+    pub fn cmake_args(&self) -> Vec<String> {
+        let mut cmake_args = self
+            .cmake
+            .iter()
+            .map(|(k, v)| format!("-{} {}", k, v))
+            .collect::<Vec<String>>();
+        let compile_config_args = self
+            .compile_config
+            .iter()
+            .map(|(k, v)| format!("-D{}={}", k, v))
+            .collect::<Vec<String>>();
+
+        cmake_args.extend(compile_config_args);
+        cmake_args
+    }
+}
+pub(crate) fn init_config() -> Result<(), Report> {
+    let config_path = cache_root()?.join("config.toml");
+
+    let config_exist = fs::exists(&config_path).wrap_err("file system error")?;
+    if config_exist {
+        return Ok(());
+    }
+    let mut config = Config::default();
+    // Example default values
+
+    let cmake = search_cmake()
+        .wrap_err("'cmake' cannot be found")
+        .with_suggestion(suggest_install_cmake)?;
+    let generator = get_cmake_default_generator(cmake)?;
+
+    config
+        .cache
+        .insert("delete_src".to_string(), "false".to_string());
+    config
+        .cache
+        .insert("delete_xz".to_string(), "false".to_string());
+    if generator.contains("Visual Studio") {
+        config
+            .cmake
+            .insert("G".to_string(), "Visual Studio".to_string());
+    } else {
+        config.cmake.insert("G".to_string(), "Ninja".to_string());
+    }
+    config.cmake.insert("B".to_string(), "build".to_string());
+    config.cmake.insert("S".to_string(), "llvm".to_string());
+    config
+        .compile_config
+        .insert("CMAKE_BUILD_TYPE".to_string(), "Release".to_string());
+    config.compile_config.insert(
+        "LLVM_ENABLE_PROJECTS".to_string(),
+        "\"clang;lld\"".to_string(),
+    );
+    config
+        .compile_config
+        .insert("LLVM_TARGETS_TO_BUILD".to_string(), "X86".to_string());
+    config
+        .compile_config
+        .insert("LLVM_INSTALL_PREFIX".to_string(), ".".to_string());
+
+    let toml_string =
+        toml::to_string(&config).wrap_err_with(|| format!("failed to read from {:?}", config))?;
+    fs::write(&config_path, toml_string)
+        .wrap_err_with(|| format!("can't write to {:?}", config_path.display()))
+}
+
+pub(crate) fn read_config() -> Result<Config, Report> {
+    init_config()?;
+    let root_path = cache_root().wrap_err("Can't find the cache directory")?;
+    let config_path = root_path.join("config.toml");
+
+    let config_str =
+        read_to_string(&config_path).wrap_err("Failed to read the configuration file")?;
+
+    let config: Config =
+        toml::from_str(&config_str).wrap_err("Failed to parse the configuration file")?;
+
+    Ok(config)
 }
 
 pub(crate) fn move_dir(
@@ -478,3 +599,17 @@ pub(crate) fn get_cmake_default_generator(cmake: PathBuf) -> Result<String, Repo
             .with_suggestion(|| "Install `Microsoft Visual Studio`")
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn print_default_config() -> Result<(), Report> {
+        let config = read_config()?;
+        println!("{:?}", config.cmake_args());
+        Ok(())
+    }
+}
+
